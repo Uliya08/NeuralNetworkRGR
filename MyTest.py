@@ -61,7 +61,7 @@ RUSSIAN_SIGN_NAMES = {
 
 
 class RoadSignRecognizer:
-    def __init__(self, model_path='model_weights/full_model.h5', annotations_file='Test.csv'):
+    def __init__(self, model_path='model_weights/best_model.h5', annotations_file='Test.csv'):
         self.model = self.load_model(model_path)
         self.annotations = self.load_annotations(annotations_file)
         self.root = tk.Tk()
@@ -106,7 +106,7 @@ class RoadSignRecognizer:
                     self.annotations[filename]['true_name'])
         return None, None
 
-    def load_and_prepare_image(self, image_path, target_size=(30, 30)):
+    def load_and_prepare_image(self, image_path, target_size=(64, 64)):
         """Загружает и подготавливает изображение для модели"""
         try:
             image = Image.open(image_path)

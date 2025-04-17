@@ -1,190 +1,190 @@
 import os
-import random
-
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
-from keras.callbacks import EarlyStopping
-from keras.callbacks import ModelCheckpoint
-from keras.layers import Conv2D, MaxPool2D, Dense, Flatten, Dropout
-from keras.models import Sequential
-from keras.utils import to_categorical
-from sklearn.model_selection import train_test_split
-from tensorflow.keras import backend as K
+from tensorflow.keras import layers, models, callbacks, utils
 from tensorflow.keras.preprocessing.image import img_to_array
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from imgaug import augmenters as iaa
 
-# Создаем папку для сохранения весов
+# Настройки
 os.makedirs('model_weights', exist_ok=True)
+IMG_SIZE = (64, 64)
+BATCH_SIZE = 64
+EPOCHS = 12
+PATIENCE = 5
+NUM_CLASSES = 43
+MIN_SAMPLES = 800  # Минимальное количество образцов на класс
 
-# Загрузка и подготовка данных
-data = []
-labels = []
-classes = len(os.listdir('train'))
-for num in range(0, classes):
-    path = os.path.join('train', str(num))
-    imagePaths = os.listdir(path)
-    for img in imagePaths:
-        image = Image.open(os.path.join(path, img))
-        image = image.resize((30, 30))
-        image = img_to_array(image)
-        data.append(image)
-        labels.append(num)
 
-data = np.array(data)
-labels = np.array(labels)
+def create_augmenter():
+    """Создает аугментатор с базовыми преобразованиями"""
+    return iaa.Sequential([
+        iaa.Fliplr(0.3),
+        iaa.Affine(
+            rotate=(-15, 15),
+            scale=(0.9, 1.1),
+            translate_percent=(-0.1, 0.1)
+        ),
+        iaa.Sometimes(0.3, iaa.GaussianBlur(sigma=(0, 0.5))),
+        iaa.Sometimes(0.2, iaa.AdditiveGaussianNoise(scale=(0, 0.03 * 255)))
+    ])
 
-print(data.shape, labels.shape)
 
-# Разделение данных
-X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, random_state=42)
-print(X_train.shape, X_test.shape, y_train.shape, y_test.shape)
+def load_and_preprocess_data(data_dir='train'):
+    """Загрузка и предварительная обработка данных"""
+    data, labels = [], []
 
-# Функция для подсчета количества изображений по классам
-def cnt_img_in_classes(labels):
-    count = {}
-    for i in labels:
-        if i in count:
-            count[i] += 1
-        else:
-            count[i] = 1
-    return count
+    for class_id in range(NUM_CLASSES):
+        class_dir = os.path.join(data_dir, str(class_id))
+        if not os.path.exists(class_dir):
+            continue
 
-# Визуализация распределения классов
-samples_distribution = cnt_img_in_classes(y_train)
+        for img_name in os.listdir(class_dir):
+            try:
+                img = Image.open(os.path.join(class_dir, img_name)).convert('RGB')
+                img = img.resize(IMG_SIZE)
+                data.append(img_to_array(img))
+                labels.append(class_id)
+            except Exception as e:
+                print(f"Ошибка загрузки {img_name}: {e}")
 
-def diagram(count_classes):
-    plt.bar(range(len(count_classes)), sorted(list(count_classes.values())), align='center')
-    plt.xticks(range(len(count_classes)), sorted(list(count_classes.keys())), rotation=90, fontsize=7)
+    return np.array(data), np.array(labels)
+
+
+def build_optimized_model(input_shape, num_classes):
+    """Оптимизированная архитектура модели"""
+    model = models.Sequential([
+        # Блок 1
+        layers.Conv2D(32, (3, 3), activation='relu', padding='same', input_shape=input_shape),
+        layers.BatchNormalization(),
+        layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.25),
+
+        # Блок 2
+        layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.3),
+
+        # Блок 3
+        layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
+        layers.BatchNormalization(),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.4),
+
+        # Полносвязные слои
+        layers.Flatten(),
+        layers.Dense(256, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Dropout(0.5),
+        layers.Dense(num_classes, activation='softmax')
+    ])
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+    model.compile(optimizer=optimizer,
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy',
+                           tf.keras.metrics.Precision(name='precision'),
+                           tf.keras.metrics.Recall(name='recall')])
+    return model
+
+
+def main():
+    # Загрузка данных
+    print("[INFO] Загрузка и предобработка данных...")
+    data, labels = load_and_preprocess_data()
+
+    # Балансировка классов
+    unique, counts = np.unique(labels, return_counts=True)
+    for class_id, count in zip(unique, counts):
+        if count < MIN_SAMPLES:
+            print(f"Класс {class_id} имеет только {count} образцов")
+
+    # Разделение данных
+    X_train, X_test, y_train, y_test = train_test_split(
+        data, labels, test_size=0.2, random_state=42, stratify=labels)
+
+    # Преобразование меток
+    y_train = utils.to_categorical(y_train, NUM_CLASSES)
+    y_test = utils.to_categorical(y_test, NUM_CLASSES)
+
+    # Нормализация
+    X_train = X_train.astype('float32') / 255.0
+    X_test = X_test.astype('float32') / 255.0
+
+    # Построение модели
+    print("[INFO] Создание модели...")
+    model = build_optimized_model((*IMG_SIZE, 3), NUM_CLASSES)
+    model.summary()
+
+    # Коллбэки
+    callbacks_list = [
+        callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=PATIENCE,
+            restore_best_weights=True,
+            verbose=1,
+            min_delta=0.001
+        ),
+        callbacks.ModelCheckpoint(
+            filepath='model_weights/best_model.h5',
+            monitor='val_accuracy',
+            save_best_only=True,
+            mode='max',
+            verbose=1
+        ),
+        callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.2,
+            patience=2,
+            verbose=1,
+            min_lr=1e-6
+        )
+    ]
+
+    # Обучение модели
+    print("[INFO] Обучение модели...")
+    history = model.fit(
+        X_train, y_train,
+        batch_size=BATCH_SIZE,
+        epochs=EPOCHS,
+        validation_data=(X_test, y_test),
+        callbacks=callbacks_list,
+        verbose=1
+    )
+
+    # Сохранение модели
+    model.save('model_weights/final_model.h5')
+    print("[INFO] Модель сохранена")
+
+    # Визуализация результатов
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='train_loss')
+    plt.plot(history.history['val_loss'], label='val_loss')
+    plt.title('Loss Curves')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['accuracy'], label='train_acc')
+    plt.plot(history.history['val_accuracy'], label='val_acc')
+    plt.title('Accuracy Curves')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('training_curves.png')
     plt.show()
 
-diagram(samples_distribution)
+    # Оценка модели
+    print("[INFO] Оценка модели...")
+    results = model.evaluate(X_test, y_test, verbose=0)
+    print(f"Test Accuracy: {results[1]:.4f}")
+    print(f"Test Precision: {results[2]:.4f}")
+    print(f"Test Recall: {results[3]:.4f}")
 
-# Аугментация данных
-def aug_images(images, p):
-    from imgaug import augmenters as iaa
-    augs = iaa.SomeOf((2, 4),
-                      [
-                          iaa.Crop(px=(0, 4)),
-                          iaa.Affine(scale={"x": (0.8, 1.2), "y": (0.8, 1.2)}),
-                          iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)}),
-                          iaa.Affine(rotate=(-45, 45)),
-                          iaa.Affine(shear=(-10, 10))
-                      ])
 
-    seq = iaa.Sequential([iaa.Sometimes(p, augs)])
-    res = seq.augment_images(images)
-    return res
-
-def augmentation(images, labels):
-    min_imgs = 500
-    classes = cnt_img_in_classes(labels)
-    for i in range(len(classes)):
-        if (classes[i] < min_imgs):
-            add_num = min_imgs - classes[i]
-            imgs_for_augm = []
-            lbls_for_augm = []
-            for j in range(add_num):
-                im_index = random.choice(np.where(labels == i)[0])
-                imgs_for_augm.append(images[im_index])
-                lbls_for_augm.append(labels[im_index])
-            augmented_class = aug_images(imgs_for_augm, 1)
-            augmented_class_np = np.array(augmented_class)
-            augmented_lbls_np = np.array(lbls_for_augm)
-            images = np.concatenate((images, augmented_class_np), axis=0)
-            labels = np.concatenate((labels, augmented_lbls_np), axis=0)
-    return (images, labels)
-
-X_train, y_train = augmentation(X_train, y_train)
-print(X_train.shape, X_test.shape, y_train.shape, y_test.shape)
-
-augmented_samples_distribution = cnt_img_in_classes(y_train)
-diagram(augmented_samples_distribution)
-
-# Преобразование меток в one-hot encoding
-y_train = to_categorical(y_train, 43)
-y_test = to_categorical(y_test, 43)
-
-# Архитектура модели
-class Net:
-    @staticmethod
-    def build(width, height, depth, classes):
-        inputShape = (height, width, depth)
-        if K.image_data_format() == 'channels_first':
-            inputShape = (depth, height, width)
-        model = Sequential()
-        model.add(Conv2D(filters=32, kernel_size=(3,3), activation='relu', input_shape=inputShape))
-        model.add(Conv2D(filters=32, kernel_size=(3,3), activation='relu'))
-        model.add(MaxPool2D(pool_size=(2, 2)))
-        model.add(Dropout(rate=0.25))
-        model.add(Conv2D(filters=64, kernel_size=(3, 3), activation='relu'))
-        model.add(Conv2D(filters=64, kernel_size=(3, 3), activation='relu'))
-        model.add(MaxPool2D(pool_size=(2, 2)))
-        model.add(Dropout(rate=0.25))
-        model.add(Flatten())
-        model.add(Dense(500, activation='relu'))
-        model.add(Dropout(rate=0.5))
-        model.add(Dense(classes, activation='softmax'))
-        return model
-
-# Нормализация данных
-X_train = X_train.astype('float32') / 255.0
-X_test = X_test.astype('float32') / 255.0
-
-# Проверка размерностей
-print("Проверка размеров:")
-print("X_train:", X_train.shape, "y_train:", y_train.shape)
-print("X_test:", X_test.shape, "y_test:", y_test.shape)
-
-# Создание и компиляция модели
-model = Net.build(width=30, height=30, depth=3, classes=43)
-model.compile(loss='categorical_crossentropy',
-              optimizer='adam',
-              metrics=['accuracy'])
-
-# Callback для сохранения весов
-checkpoint = ModelCheckpoint(
-    filepath='model_weights/weights-{epoch:02d}-{val_accuracy:.2f}.h5',
-    monitor='val_accuracy',
-    save_best_only=True,
-    save_weights_only=True,
-    mode='max',
-    verbose=1
-)
-early_stopping = EarlyStopping(
-    monitor='val_loss',
-    patience=5,
-    restore_best_weights=True
-)
-# Обучение модели с сохранением весов
-epochs = 1
-history = model.fit(
-    X_train, y_train,
-    batch_size=64,
-    epochs=epochs,
-    validation_data=(X_test, y_test),
-    callbacks=[checkpoint, early_stopping],  # Передаем как список
-    verbose=1
-)
-
-# Сохранение финальных весов
-model.save_weights('model_weights/final_weights.h5')
-
-# Сохранение полной модели (опционально)
-model.save('model_weights/full_model.h5')
-
-plt.style.use("ggplot")  # Исправлено: "ggplot" вместо "plot"
-plt.figure(figsize=(10, 5))
-
-epochs = len(history.history['loss'])  # Берем реальное количество эпох
-
-plt.plot(history.history["loss"], label="train_loss")
-plt.plot(history.history["val_loss"], label="val_loss")
-plt.plot(history.history["accuracy"], label="train_acc")
-plt.plot(history.history["val_accuracy"], label="val_acc")
-
-plt.title("Training Loss and Accuracy")
-plt.xlabel("Epoch")
-plt.ylabel("Loss/Accuracy")
-plt.legend()
-plt.grid(True)
-plt.show()
+if __name__ == "__main__":
+    main()
