@@ -3,11 +3,16 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from tensorflow.keras.preprocessing.image import img_to_array
-from keras.models import load_model
+from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
 import random
+import tensorflow as tf
 
-# Словарь русских названий дорожных знаков
+# Уменьшаем уровень логов TensorFlow
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+tf.get_logger().setLevel('ERROR')
+
+# Словарь русских названий дорожных знаков (сокращенный под ваш CSV)
 RUSSIAN_SIGN_NAMES = {
     0: "Ограничение скорости (20 км/ч)",
     1: "Ограничение скорости (30 км/ч)",
@@ -56,110 +61,103 @@ RUSSIAN_SIGN_NAMES = {
 
 
 def load_annotations(csv_file='Test.csv'):
-    """Загружает аннотации из CSV-файла, пропуская заголовок"""
-    annotations = {}
+    """Загружает аннотации из CSV-файла"""
     try:
-        # Читаем CSV с помощью pandas (автоматически пропустит заголовок)
-        df = pd.read_csv(csv_file, header=0)
+        df = pd.read_csv(csv_file)
+        annotations = {}
 
         for _, row in df.iterrows():
-            filename = row[7].split('/')[-1]  # Получаем только имя файла
+            filename = os.path.basename(row['Path'])
+            class_id = int(row['ClassId'])
             annotations[filename] = {
-                'bbox': [int(row[0]), int(row[1]), int(row[2]), int(row[3])],
-                'center': [int(row[4]), int(row[5])],
-                'class_id': int(row[6]),
-                'true_name': RUSSIAN_SIGN_NAMES.get(int(row[6]), f"Неизвестный класс ({int(row[6])})")
+                'bbox': [int(row['Roi.X1']), int(row['Roi.Y1']),
+                         int(row['Roi.X2']), int(row['Roi.Y2'])],
+                'class_id': class_id,
+                'true_name': RUSSIAN_SIGN_NAMES.get(class_id, f"Неизвестный класс ({class_id})")
             }
         print(f"Загружено {len(annotations)} аннотаций")
+        return annotations
     except Exception as e:
-        print(f"Ошибка загрузки аннотаций: {e}")
-    return annotations
-
-
-def load_and_prepare_image(image_path, target_size=(30, 30)):
-    try:
-        image = Image.open(image_path)
-        image = image.resize(target_size)
-        image_array = img_to_array(image)
-        return np.expand_dims(image_array, axis=0) / 255.0
-    except Exception as e:
-        print(f"Ошибка загрузки изображения {image_path}: {e}")
+        print(f"Ошибка загрузки аннотаций: {str(e)}")
         return None
 
 
-def predict_and_visualize(model, annotations, test_dir='test'):
+def load_and_prepare_image(image_path, target_size=(64, 64)):
+    """Загружает и подготавливает изображение для модели"""
+    try:
+        image = Image.open(image_path).convert('RGB').resize(target_size)
+        return np.expand_dims(img_to_array(image) / 255.0, axis=0)
+    except Exception as e:
+        print(f"Ошибка обработки изображения {image_path}: {str(e)}")
+        return None
+
+
+def predict_and_visualize(model, annotations, test_dir='Test'):
+    """Делает предсказание и визуализирует результат"""
     if not annotations:
-        print("Нет данных аннотаций!")
         return
 
-    # Выбираем случайное изображение из аннотаций
-    filename = random.choice(list(annotations.keys()))
-    annotation = annotations[filename]
+    available_images = [f for f in os.listdir(test_dir) if f in annotations]
+    if not available_images:
+        return
 
-    # Загружаем и обрабатываем изображение для модели
+    filename = random.choice(available_images)
     image_path = os.path.join(test_dir, filename)
     image_array = load_and_prepare_image(image_path)
 
     if image_array is None:
         return
 
-    # Делаем предсказание
-    prediction = model.predict(image_array)
-    predicted_class = np.argmax(prediction)
-    predicted_name = RUSSIAN_SIGN_NAMES.get(predicted_class, f"Неизвестный класс ({predicted_class})")
-    confidence = np.max(prediction) * 100
+    try:
+        prediction = model.predict(image_array)
+        predicted_class = np.argmax(prediction)
+        confidence = np.max(prediction) * 100
+        annotation = annotations[filename]
 
-    # Визуализация
-    plt.figure(figsize=(6, 5))
+        plt.figure(figsize=(10, 8))
+        plt.imshow(Image.open(image_path))
 
-    # Показываем оригинальное изображение
-    original_image = Image.open(image_path)
-    plt.imshow(original_image)
+        # Рисуем bounding box
+        x1, y1, x2, y2 = annotation['bbox']
+        plt.gca().add_patch(plt.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1,
+            linewidth=2, edgecolor='green', facecolor='none'
+        ))
 
-    # Рисуем bounding box из аннотации
-    x1, y1, width, height = annotation['bbox']
-    rect = plt.Rectangle((x1, y1), width, height,
-                         linewidth=2, edgecolor='green', facecolor='none')
-    plt.gca().add_patch(rect)
+        plt.title(
+            f"Файл: {filename}\n"
+            f"Истинный класс: {annotation['true_name']}\n"
+            f"Предсказанный класс: {RUSSIAN_SIGN_NAMES.get(predicted_class, 'Неизвестный класс')}\n"
+            f"Уверенность: {confidence:.2f}%",
+            fontsize=12, pad=20
+        )
+        plt.axis('off')
+        plt.tight_layout()
+        plt.show()
 
-    # Добавляем метки
-    title = (f"Файл: {filename}\n"
-             f"Настоящий класс: {annotation['true_name']} (класс {annotation['class_id']})\n"
-             f"Предсказанный класс: {predicted_name} (класс {predicted_class})\n"
-             f"Уверенность: {confidence:.2f}%")
-
-    plt.title(title, fontsize=12)
-    plt.axis('off')
-    plt.tight_layout()
-    plt.show()
+    except Exception as e:
+        print(f"Ошибка: {str(e)}")
 
 
 def main():
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Уменьшаем уровень логов TensorFlow
-
-    # Загрузка аннотаций
     print("[INFO] Загрузка аннотаций...")
-    annotations = load_annotations('Test.csv')
+    annotations = load_annotations()
 
     if not annotations:
-        print("Не удалось загрузить аннотации!")
+        print("[ERROR] Не удалось загрузить аннотации!")
         return
 
-    # Загрузка модели
     print("[INFO] Загрузка модели...")
     try:
-        model = load_model('model_weights/full_model.h5')  # Или ваш путь к модели
-        print("Модель успешно загружена")
+        model = load_model('model_weights/final_model.h5')
     except Exception as e:
-        print(f"Ошибка загрузки модели: {e}")
+        print(f"[ERROR] Ошибка загрузки модели: {str(e)}")
         return
 
-    # Проверка нескольких случайных изображений
-    for _ in range(3):  # Можно изменить количество
-        print("\n[INFO] Анализ изображения...")
+    for i in range(3):
+        print(f"\nТест #{i + 1}")
         predict_and_visualize(model, annotations)
 
 
 if __name__ == "__main__":
     main()
-

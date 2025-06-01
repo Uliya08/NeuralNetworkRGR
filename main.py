@@ -73,6 +73,7 @@ def build_optimized_model(input_shape, num_classes):
         # Блок 3
         layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
         layers.BatchNormalization(),
+        layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
         layers.MaxPooling2D((2, 2)),
         layers.Dropout(0.4),
 
